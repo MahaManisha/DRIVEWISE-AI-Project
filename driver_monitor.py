@@ -2,7 +2,8 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-import pyttsx3
+import pythoncom
+import win32com.client
 import threading
 import time
 import os
@@ -69,14 +70,15 @@ class VoiceAlertSystem:
     def _worker(self):
         print("[VoiceSystem] Info: Voice Worker Started.")
         
-        # Initialize engine ONCE inside the target thread
+        # Initialize COM and engine ONCE inside the target thread
         try:
-            engine = pyttsx3.init()
-            rate = engine.getProperty('rate')
-            engine.setProperty('rate', max(100, rate - 20)) 
+            pythoncom.CoInitialize()
+            engine = win32com.client.Dispatch("SAPI.SpVoice")
             
-            engine.say("Driver monitoring system active.")
-            engine.runAndWait()
+            # Reduce SAPI rate slightly if too fast
+            engine.Rate = -2 
+            
+            engine.Speak("Driver monitoring system active.")
         except Exception as e:
             print(f"[VoiceSystem] TTS Initialization Error: {e}")
             engine = None
@@ -89,8 +91,8 @@ class VoiceAlertSystem:
                 if engine is not None:
                      print(f"[VoiceSystem] Speaking: {msg}")
                      try:
-                         engine.say(msg)
-                         engine.runAndWait()
+                         # SAPI Speak function is synchronous by default
+                         engine.Speak(msg)
                      except Exception as e:
                          print(f"[VoiceSystem] Error speaking '{msg}': {e}")
                          
@@ -100,6 +102,10 @@ class VoiceAlertSystem:
                 continue
             except Exception as e:
                 print(f"[VoiceSystem] Unexpected worker error: {e}")
+                
+        # Cleanup
+        if engine is not None:
+            pythoncom.CoUninitialize()
 
     def say(self, message):
         if self.stop_event.is_set():
@@ -208,41 +214,67 @@ class AlertManager:
     def check_alert(self, alert_id, condition, message, override_cooldown=None):
         """
         Returns (should_trigger, display_message)
-        Strict Rising-Edge Logic:
-        1. Only triggers when condition changes from FALSE -> TRUE.
-        2. If condition stays TRUE, it does NOT re-trigger continuously.
-        3. A cooldown applies to prevent bouncing/spamming when a condition toggles rapidly between TRUE and FALSE.
+        Repeated Alerting Logic:
+        If condition is TRUE, triggers repeatedly as long as cooldown has passed.
         """
         current_time = time.time()
         cooldown = override_cooldown if override_cooldown is not None else self.default_cooldown
         
         with self.lock:
-            # Initialize state if this is a new alert
             if alert_id not in self.states:
                 self.states[alert_id] = {
-                    'previous_state': False, 
                     'last_trigger_time': 0.0
                 }
                 
             state = self.states[alert_id]
             should_trigger = False
             
-            # Rising Edge Condition: Current frame is TRUE, previous frame was FALSE
-            if condition and not state['previous_state']:
-                
-                # Cooldown check: Has enough time passed since the *last time this fired*?
+            # Trigger if condition is true and enough time has passed
+            if condition:
                 if (current_time - state['last_trigger_time']) >= cooldown:
                     should_trigger = True
                     state['last_trigger_time'] = current_time
-            
-            # Update the previous state for the next frame's comparison
-            state['previous_state'] = condition
         
-        # Return outside the lock
         if should_trigger:
             return True, message
             
         return False, None
+
+# -------------------------------------------------------------------
+# SPEED SIMULATOR (Keyboard)
+# -------------------------------------------------------------------
+class SpeedSimulator:
+    def __init__(self, max_speed=120.0, accel_rate=35.0, decel_rate=15.0):
+        self.speed = 0.0
+        self.max_speed = max_speed
+        self.accel_rate = accel_rate
+        self.decel_rate = decel_rate
+        self.last_time = time.time()
+        try:
+            import keyboard
+            self.keyboard = keyboard
+        except ImportError:
+            print("Warning: 'keyboard' module missing. Run: pip install keyboard")
+            self.keyboard = None
+
+    def update(self):
+        current_time = time.time()
+        dt = current_time - self.last_time
+        self.last_time = current_time
+        
+        # Clamp dt to prevent massive jumps on thread lag
+        dt = min(dt, 0.1)
+
+        if self.keyboard and self.keyboard.is_pressed('w'):
+            self.speed += self.accel_rate * dt
+            if self.speed > self.max_speed:
+                self.speed = self.max_speed
+        else:
+            self.speed -= self.decel_rate * dt
+            if self.speed < 0.0:
+                self.speed = 0.0
+                
+        return self.speed
 
 # -------------------------------------------------------------------
 # MAIN SYSTEM
@@ -285,7 +317,9 @@ class DriverMonitoringSystem:
         # Subsystems
         self.voice = VoiceAlertSystem()
         self.audio = AudioMonitor()
-        self.alert_manager = AlertManager(cooldown=5.0) # 5 Second Cooldown
+        self.alert_manager = AlertManager(default_cooldown=5.0) # 5 Second Cooldown
+        self.speed_sim = SpeedSimulator()
+        self.current_speed = 0.0
 
         # Data
         self.ear_frame_counter = 0
@@ -310,14 +344,16 @@ class DriverMonitoringSystem:
         # List of tuples: (AlertID, Condition, Message, BlockingPriority, CooldownOverride)
         
         alerts_config = [
-            ("DROWSY", self.drowsy_flag, "Driver is drowsy. Please stay alert.", True, None),
-            ("PHONE_AND_FATIGUE", (self.phone_detected and self.fatigue_flag), "Critical warning! You are tired and using a phone. Please stop immediately.", True, None),
-            ("PHONE", self.phone_detected, "Phone usage detected. Please focus on driving.", False, None),
-            ("PASSENGER", self.passenger_close_detected, "Passenger too close to driver. Please maintain distance.", False, 10.0), # 10s for Passenger
-            ("LOOKING_AWAY", self.is_distracted, "Please focus on driving.", False, None),
-            ("TALKING", self.talking_flag, "Excessive talking detected. Focus on driving.", False, 300.0), # 5 MINUTES Cooldown
-            ("EMOTION", (self.current_emotion in ['sad', 'fear'] and not self.fatigue_flag), "You look tired. Ensure you are fit to drive.", False, 15.0),
-            ("HIGH_RISK", (risk_score >= 12), "Warning. High risk levels detected.", False, None),
+            ("SPEED_DROWSY", (self.fatigue_flag and self.current_speed > 80), "Danger! High speed and fatigue detected. SLOW DOWN IMMEDIATELY!", True, 5.0),
+            ("DROWSY", self.drowsy_flag, "Driver is drowsy. Please stay alert.", True, 4.0),
+            ("PHONE_AND_FATIGUE", (self.phone_detected and self.fatigue_flag), "Critical warning! You are tired and using a phone. Please stop immediately.", True, 5.0),
+            ("PHONE", self.phone_detected, "Phone usage detected. Please focus on driving.", False, 4.0),
+            ("PASSENGER", self.passenger_close_detected, "Passenger too close to driver. Please maintain distance.", False, 5.0),
+            ("LOOKING_AWAY", self.is_distracted, "Please focus on driving.", False, 4.0),
+            ("TALKING", self.talking_flag, "Excessive talking detected. Focus on driving.", False, 10.0),
+            ("EMOTION", (self.current_emotion in ['sad', 'fear'] and not self.fatigue_flag), "You look tired. Ensure you are fit to drive.", False, 10.0),
+            ("HIGH_RISK", (risk_score >= 12), "Warning. High risk levels detected.", False, 5.0),
+            ("SAFE", (risk_score == 0 and self.current_speed > 0 and self.current_speed <= 80), "Status safe. Driving conditions normal.", False, 60.0),
         ]
         
         triggered_this_frame = False
@@ -482,6 +518,9 @@ class DriverMonitoringSystem:
             if self.drowsy_flag or (self.current_emotion in ['sad', 'fear']):
                 self.fatigue_flag = True
 
+            # --- SPEED UPDATE ---
+            self.current_speed = self.speed_sim.update()
+
             # --- SCORING ---
             risk_score = 0
             if self.drowsy_flag: risk_score += RISK_DROWSY
@@ -491,6 +530,12 @@ class DriverMonitoringSystem:
             if self.current_emotion in ['sad', 'fear']: risk_score += RISK_EMOTION_FATIGUE
             if self.passenger_detected: risk_score += RISK_PASSENGER
             
+            # High speed penalty
+            if self.current_speed > 80.0 and self.fatigue_flag:
+                risk_score += 10 # Massive penalty for fatigue at high speed
+            elif self.current_speed > 100.0:
+                risk_score += 2 # Minor penalty for very high speed
+
             # --- PROCESS ALERTS ---
             self.process_logic_and_alerts(risk_score)
 
@@ -521,6 +566,11 @@ class DriverMonitoringSystem:
                 cv2.putText(frame, "PASSENGER DETECTED", (320, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,140,255), 2)
             y+=30; draw_text(frame, f"Score: {risk_score}", (10,y), col)
             y+=30; draw_text(frame, f"Level: {lev}", (10,y), col)
+
+            # Speed HUD Plugin (Top Right)
+            speed_col = (0, 255, 0) if self.current_speed <= 60 else (0, 165, 255) if self.current_speed <= 90 else (0, 0, 255)
+            cv2.putText(frame, f"SPEED: {int(self.current_speed)} km/h", (w - 300, 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, speed_col, 3)
 
             # Display active alert toast
             if self.current_display_alert and (time.time() - self.last_display_time < 3.0):
