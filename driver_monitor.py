@@ -21,17 +21,17 @@ logging.getLogger('tensorflow').setLevel(logging.ERROR)
 # CONFIGURATION & CONSTANTS
 # -------------------------------------------------------------------
 
-EAR_THRESHOLD = 0.20
-EAR_CONSEC_FRAMES = 30
+EAR_THRESHOLD = 0.25  # Adjusted for better sensitivity (was 0.20, then 0.22)
+EAR_CONSEC_FRAMES = 20 # Slightly faster reaction (was 30, then 25)
 HEAD_YAW_THRESHOLD = 20
-HEAD_POSE_TIME_THRESHOLD = 2.0
+HEAD_POSE_TIME_THRESHOLD = 1.0 # Reduced from 2.0 for faster testing
 EMOTION_INTERVAL = 10  # Process emotion every N frames
 
 # Audio
 SAMPLE_RATE = 16000
-AUDIO_THRESHOLD = 0.02  # Low threshold
-AUDIO_DURATION = 3.0    # 3 seconds of talking triggers alert
-AUDIO_SILENCE_TOLERANCE = 1.0 # 1 sec pause allowed
+AUDIO_THRESHOLD = 0.15  # Increased to prevent background noise triggers (was 0.02)
+AUDIO_DURATION = 5.0    # 5 seconds of talking required (was 3.0)
+AUDIO_SILENCE_TOLERANCE = 0.8 # Reset faster on silence
 
 # Risk Points
 RISK_DROWSY = 5
@@ -60,38 +60,55 @@ MODEL_PATH = "face_landmarker.task"
 # -------------------------------------------------------------------
 class VoiceAlertSystem:
     def __init__(self):
-        self.queue = queue.Queue()
+        # Limit queue size to prevent stale, overlapping speech buildup
+        self.queue = queue.Queue(maxsize=3) 
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
     def _worker(self):
+        print("[VoiceSystem] Info: Voice Worker Started.")
+        
+        # Initialize engine ONCE inside the target thread
         try:
             engine = pyttsx3.init()
             rate = engine.getProperty('rate')
-            engine.setProperty('rate', rate - 20)
-        except Exception as e:
-            print(f"TTS Init Error: {e}")
-            return
+            engine.setProperty('rate', max(100, rate - 20)) 
             
+            engine.say("Driver monitoring system active.")
+            engine.runAndWait()
+        except Exception as e:
+            print(f"[VoiceSystem] TTS Initialization Error: {e}")
+            engine = None
+
         while not self.stop_event.is_set():
             try:
-                msg = self.queue.get(timeout=0.5)
-                try:
-                    engine.say(msg)
-                    engine.runAndWait()
-                except Exception as e:
-                    print(f"TTS Say Error: {e}")
-                finally:
-                    self.queue.task_done()
+                # Use a small timeout to allow checking the stop_event frequently
+                msg = self.queue.get(timeout=0.2)
+                
+                if engine is not None:
+                     print(f"[VoiceSystem] Speaking: {msg}")
+                     try:
+                         engine.say(msg)
+                         engine.runAndWait()
+                     except Exception as e:
+                         print(f"[VoiceSystem] Error speaking '{msg}': {e}")
+                         
+                self.queue.task_done()
+
             except queue.Empty:
                 continue
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[VoiceSystem] Unexpected worker error: {e}")
 
     def say(self, message):
-        if self.queue.qsize() < 2:
-            self.queue.put(message)
+        if self.stop_event.is_set():
+            return
+            
+        try:
+            self.queue.put_nowait(message)
+        except queue.Full:
+            pass # Prevent queue flooding and overlapping lag
 
     def stop(self):
         self.stop_event.set()
@@ -179,6 +196,55 @@ def draw_text(img, text, pos, color=(0,255,0), scale=0.6):
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2)
 
 # -------------------------------------------------------------------
+# ALERT MANAGER (Logic Engine)
+# -------------------------------------------------------------------
+class AlertManager:
+    def __init__(self, default_cooldown=7.0):
+        self.default_cooldown = default_cooldown
+        # Thread-lock ensures precision if Vision and Audio threads write flags concurrently
+        self.lock = threading.Lock()
+        self.states = {} # {alert_id: {'previous_state': bool, 'last_trigger_time': float}}
+        
+    def check_alert(self, alert_id, condition, message, override_cooldown=None):
+        """
+        Returns (should_trigger, display_message)
+        Strict Rising-Edge Logic:
+        1. Only triggers when condition changes from FALSE -> TRUE.
+        2. If condition stays TRUE, it does NOT re-trigger continuously.
+        3. A cooldown applies to prevent bouncing/spamming when a condition toggles rapidly between TRUE and FALSE.
+        """
+        current_time = time.time()
+        cooldown = override_cooldown if override_cooldown is not None else self.default_cooldown
+        
+        with self.lock:
+            # Initialize state if this is a new alert
+            if alert_id not in self.states:
+                self.states[alert_id] = {
+                    'previous_state': False, 
+                    'last_trigger_time': 0.0
+                }
+                
+            state = self.states[alert_id]
+            should_trigger = False
+            
+            # Rising Edge Condition: Current frame is TRUE, previous frame was FALSE
+            if condition and not state['previous_state']:
+                
+                # Cooldown check: Has enough time passed since the *last time this fired*?
+                if (current_time - state['last_trigger_time']) >= cooldown:
+                    should_trigger = True
+                    state['last_trigger_time'] = current_time
+            
+            # Update the previous state for the next frame's comparison
+            state['previous_state'] = condition
+        
+        # Return outside the lock
+        if should_trigger:
+            return True, message
+            
+        return False, None
+
+# -------------------------------------------------------------------
 # MAIN SYSTEM
 # -------------------------------------------------------------------
 class DriverMonitoringSystem:
@@ -219,18 +285,15 @@ class DriverMonitoringSystem:
         # Subsystems
         self.voice = VoiceAlertSystem()
         self.audio = AudioMonitor()
-
-        # --- NEW ALERT STATE ENGINE ---
-        self.last_spoken_time = {} # Tracks cooldown per alert type
-        self.alert_cooldown = 5.0 # Seconds between SAME alert
-        self.current_display_alert = "" # For HUD text
-        self.last_display_time = 0
+        self.alert_manager = AlertManager(cooldown=5.0) # 5 Second Cooldown
 
         # Data
         self.ear_frame_counter = 0
         self.distraction_start = None
         self.prev_time = time.time()
         self.frame_count = 0
+        self.current_display_alert = ""
+        self.last_display_time = 0
         
         # Flags
         self.drowsy_flag = False
@@ -240,75 +303,41 @@ class DriverMonitoringSystem:
         self.current_emotion = "neutral"
         self.fatigue_flag = False
         self.passenger_detected = False
-
-    def trigger_alert(self, alert_type, message, priority_level):
-        """
-        Smart Alert Logic:
-        1. Checks per-alert-type cooldown.
-        2. Allows high priority interrupts.
-        """
-        current_time = time.time()
-        
-        # Initialize cooldown tracker if new type
-        if alert_type not in self.last_spoken_time:
-            self.last_spoken_time[alert_type] = 0
-        
-        # Check Cooldown
-        if current_time - self.last_spoken_time[alert_type] > self.alert_cooldown:
-            # Speak
-            self.voice.say(message)
-            # Update timers
-            self.last_spoken_time[alert_type] = current_time
-            self.current_display_alert = message
-            self.last_display_time = current_time
-            return True
-        
-        return False
+        self.passenger_close_detected = False
 
     def process_logic_and_alerts(self, risk_score):
-        # PRIORITY ORDER: 
-        # 1. High Risk (Generic or Specific)
-        # 2. Fatigue (New Fusion)
-        # 3. Phone
-        # 4. Passenger (New)
-        # 5. Drowsy
-        # 6. Looking Away (Distraction)
-        # 7. Talking
-        # 8. Emotion
+        # PRIORITY DEFINITION
+        # List of tuples: (AlertID, Condition, Message, BlockingPriority, CooldownOverride)
         
-        spoken = False
-
-        # 1. High Risk
-        if risk_score >= 11:
-            spoken = self.trigger_alert("HIGH_RISK", "High risk detected. Drive carefully.", 1)
+        alerts_config = [
+            ("DROWSY", self.drowsy_flag, "Driver is drowsy. Please stay alert.", True, None),
+            ("PHONE_AND_FATIGUE", (self.phone_detected and self.fatigue_flag), "Critical warning! You are tired and using a phone. Please stop immediately.", True, None),
+            ("PHONE", self.phone_detected, "Phone usage detected. Please focus on driving.", False, None),
+            ("PASSENGER", self.passenger_close_detected, "Passenger too close to driver. Please maintain distance.", False, 10.0), # 10s for Passenger
+            ("LOOKING_AWAY", self.is_distracted, "Please focus on driving.", False, None),
+            ("TALKING", self.talking_flag, "Excessive talking detected. Focus on driving.", False, 300.0), # 5 MINUTES Cooldown
+            ("EMOTION", (self.current_emotion in ['sad', 'fear'] and not self.fatigue_flag), "You look tired. Ensure you are fit to drive.", False, 15.0),
+            ("HIGH_RISK", (risk_score >= 12), "Warning. High risk levels detected.", False, None),
+        ]
         
-        # 2. Fatigue
-        if not spoken and self.fatigue_flag:
-            spoken = self.trigger_alert("FATIGUE", "You appear tired. Please take a break.", 2)
+        triggered_this_frame = False
+        
+        for alert_id, condition, message, is_blocking, custom_cooldown in alerts_config:
             
-        # 3. Phone
-        if not spoken and self.phone_detected:
-            spoken = self.trigger_alert("PHONE", "Phone usage detected. Please focus on driving.", 3)
+            # Check Alert logic (State change / Cooldown)
+            should_speak, msg = self.alert_manager.check_alert(alert_id, condition, message, override_cooldown=custom_cooldown)
             
-        # 4. Passenger
-        if not spoken and self.passenger_detected:
-            spoken = self.trigger_alert("PASSENGER", "Passengers, please do not disturb the driver.", 4)
+            if should_speak and not triggered_this_frame:
+                print(f"[Alert] Speaking: {msg}")
+                self.voice.say(msg)
+                self.current_display_alert = msg
+                self.last_display_time = time.time()
+                triggered_this_frame = True
             
-        # 5. Drowsy (Fallback)
-        if not spoken and self.drowsy_flag:
-            spoken = self.trigger_alert("DROWSY", "You seem sleepy. Please stay alert.", 5)
-            
-        # 6. Looking Away
-        if not spoken and self.is_distracted:
-            spoken = self.trigger_alert("LOOKING_AWAY", "Please keep your eyes on the road.", 6)
-            
-        # 7. Talking
-        if not spoken and self.talking_flag:
-            spoken = self.trigger_alert("TALKING", "Please reduce conversation and focus on driving.", 7)
-            
-        # 8. Emotion (Tired)
-        if not spoken and self.current_emotion in ['sad', 'fear']:
-            spoken = self.trigger_alert("EMOTION", "You look tired. Consider taking a short break.", 8)
+            # If this is a blocking alert (e.g. Drowsy) and the condition is True,
+            # we stop processing lower priority risks to avoid noise/spam.
+            if condition and is_blocking:
+                break
 
     def run(self):
         cap = cv2.VideoCapture(0)
@@ -383,11 +412,11 @@ class DriverMonitoringSystem:
             # --- YOLO PHONE & PERSON ---
             self.phone_detected = False
             self.passenger_detected = False
-            person_count = 0
+            self.passenger_close_detected = False
+            person_boxes = []
 
             if self.yolo:
                 try:
-                    # Detect Person (0) and Cell Phone (67)
                     results = self.yolo(frame, verbose=False, classes=[0, 67], conf=0.4)
                     for r in results:
                         for box in r.boxes:
@@ -395,23 +424,59 @@ class DriverMonitoringSystem:
                             x1, y1, x2, y2 = map(int, box.xyxy[0])
                             
                             if cls == 0: # Person
-                                person_count += 1
-                                # Draw person box slightly different if needed, or just let it trigger
-                                # cv2.rectangle(frame, (x1, y1), (x2, y2), (255,100,0), 1)
-                            
+                                person_boxes.append((x1, y1, x2, y2))
                             elif cls == 67: # Phone
                                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0,0,255), 2)
                                 cv2.putText(frame, "PHONE", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
                                 self.phone_detected = True
                     
-                    if person_count > 1:
-                        self.passenger_detected = True
+                    # Passenger Proximity Logic
+                    if face_coords and len(person_boxes) > 0:
+                        fx1, fy1, fx2, fy2 = face_coords
+                        face_center = ((fx1+fx2)//2, (fy1+fy2)//2)
+                        
+                        # Find driver body (the one containing the face or closest to it)
+                        driver_box = None
+                        min_dist = float('inf')
+                        
+                        # Separate driver and passengers
+                        passengers = []
+                        
+                        for pb in person_boxes:
+                            px1, py1, px2, py2 = pb
+                            p_center = ((px1+px2)//2, (py1+py2)//2)
+                            
+                            # Check if face is inside this box
+                            if px1 < face_center[0] < px2 and py1 < face_center[1] < py2:
+                                driver_box = pb
+                            else:
+                                passengers.append(pb)
+                        
+                        # If driver box not found by containment, assume the one matching face center heavily (fallback)
+                        # But simpler: If we have passengers, check their distance to face
+                        for pb in passengers:
+                            px1, py1, px2, py2 = pb
+                            # Check closeness to driver FACE
+                            # Distance between Passenger Box Center and Face Center
+                            p_center = ((px1+px2)//2, (py1+py2)//2)
+                            dist = np.linalg.norm(np.array(face_center) - np.array(p_center))
+                            
+                            # Heuristic threshold for "too close"
+                            # If face width is ~150px, then 200px is close (aggressive proximity).
+                            # Adjust based on camera resolution (typically 640 wide)
+                            if dist < 200: # Pixels (Reduced from 250 for precision)
+                                self.passenger_close_detected = True
+                                cv2.line(frame, face_center, p_center, (0,0,255), 2)
+                                
+                        if len(passengers) > 0:
+                            self.passenger_detected = True
 
-                except: pass
+                except Exception as e:
+                    pass
 
             # --- TALKING ---
             self.talking_flag = self.audio.is_talking_excessively
-
+            
             # --- FATIGUE FUSION ---
             self.fatigue_flag = False
             if self.drowsy_flag or (self.current_emotion in ['sad', 'fear']):

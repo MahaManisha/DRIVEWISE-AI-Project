@@ -101,6 +101,9 @@ def main():
         frame_count = 0
         current_emotion = "neutral"
         
+        last_spoken_time = 0
+        last_spoken_message = ""
+        
         while cap.isOpened():
             success, image = cap.read()
             if not success:
@@ -155,14 +158,46 @@ def main():
                         
                         if counter >= CONSEC_FRAMES:
                             alarm_on = True
-                            
-                            if not voice_triggered:
-                                voice_alert.speak("I think you feel sleepy. Please stay alert.")
-                                voice_triggered = True
                     else:
                         counter = 0
                         alarm_on = False
-                        voice_triggered = False
+                        
+            # Draw Emotion and Driver State on Screen
+            driver_state = get_driver_state(current_emotion, alarm_on)
+
+            # --- Voice Alert Logic ---
+            current_time = time.time()
+            
+            # Determine if we should speak
+            should_speak = False
+            priority_message = ""
+            
+            # Map states to messages
+            if "Drowsy" in driver_state:
+                priority_message = "Drowsiness detected. Please wake up!"
+                should_speak = True
+            elif "Aggressive" in driver_state:
+                priority_message = "Aggressive driving behavior detected. Please calm down."
+                should_speak = True
+            elif "Stressed" in driver_state:
+                priority_message = "You seem stressed. Take a deep breath."
+                should_speak = True
+            elif "Distracted" in driver_state:
+                priority_message = "Distraction detected. Eyes on the road."
+                should_speak = True
+            elif "Tired" in driver_state and "Drowsy" not in driver_state:
+                 priority_message = "You look tired. Consider a break."
+                 should_speak = True
+
+            # Cooldown logic (5 seconds for same message, 0 for new urgent message)
+            if should_speak:
+                is_new_message = (priority_message != last_spoken_message)
+                time_passed = (current_time - last_spoken_time)
+                
+                if is_new_message or (time_passed > 5.0):
+                    voice_alert.speak(priority_message)
+                    last_spoken_time = current_time
+                    last_spoken_message = priority_message
 
             # Draw Emotion and Driver State on Screen
             driver_state = get_driver_state(current_emotion, alarm_on)
