@@ -6,3 +6,5 @@ ultralytics
 deepface
 sounddevice
 tf-keras
+fastapi
+uvicorn

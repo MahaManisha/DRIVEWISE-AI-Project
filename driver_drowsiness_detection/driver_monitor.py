@@ -280,7 +280,11 @@ class SpeedSimulator:
 # MAIN SYSTEM
 # -------------------------------------------------------------------
 class DriverMonitoringSystem:
-    def __init__(self):
+    def __init__(self, headless=False):
+        self.headless = headless
+        self.is_running = True
+        self.current_frame = None
+        self.current_telemetry = {}
         # MediaPipe
         BaseOptions = mp.tasks.BaseOptions
         FaceLandmarker = mp.tasks.vision.FaceLandmarker
@@ -380,7 +384,7 @@ class DriverMonitoringSystem:
         print("System Active. Press 'q' to exit.")
         cam_matrix = None
         
-        while cap.isOpened():
+        while cap.isOpened() and self.is_running:
             ret, frame = cap.read()
             if not ret: continue
             
@@ -578,11 +582,43 @@ class DriverMonitoringSystem:
                 cv2.rectangle(frame, (w//2 - tw//2 - 10, h-50 - th - 10), (w//2 + tw//2 + 10, h-50 + 10), (0,0,0), -1)
                 cv2.putText(frame, self.current_display_alert, (w//2 - tw//2, h-50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
 
-            cv2.imshow("Driver Monitor (V3)", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            # Save current states for API streaming
+            active_alerts = []
+            time_str = time.strftime("%H:%M:%S")
+            if self.drowsy_flag:
+                active_alerts.append({"time": time_str, "type": "Drowsiness Alert", "severity": "High"})
+            if self.phone_detected:
+                active_alerts.append({"time": time_str, "type": "Phone Usage", "severity": "High"})
+            if self.is_distracted:
+                active_alerts.append({"time": time_str, "type": "Gaze Distraction", "severity": "Medium"})
+            if self.talking_flag:
+                active_alerts.append({"time": time_str, "type": "Excessive Talking", "severity": "Low"})
+            if self.passenger_close_detected:
+                active_alerts.append({"time": time_str, "type": "Passenger Proximity", "severity": "Medium"})
+
+            self.current_telemetry = {
+                "risk_score": risk_score,
+                "risk_level": lev,
+                "speed": int(self.current_speed),
+                "ear": float(round(current_ear, 2)),
+                "emotion": self.current_emotion,
+                "phone_detected": self.phone_detected,
+                "passenger_detected": self.passenger_detected,
+                "talking_detected": self.talking_flag,
+                "driver_distracted": self.is_distracted,
+                "alerts": active_alerts
+            }
+            self.current_frame = frame.copy() if frame is not None else None
+
+            if not self.headless:
+                cv2.imshow("Driver Monitor (V3)", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'): 
+                    self.is_running = False
+                    break
 
         cap.release()
-        cv2.destroyAllWindows()
+        if not self.headless:
+            cv2.destroyAllWindows()
         self.voice.stop()
         self.audio.stop()
 
