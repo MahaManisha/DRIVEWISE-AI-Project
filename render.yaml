@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: drivewise-dashboard
+    env: static
+    rootDir: dashboard
+    buildCommand: npm run build
+    publishPath: dist
