@@ -5,3 +5,6 @@ services:
     rootDir: dashboard
     buildCommand: npm run build
     staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://evil-melons-grab.loca.lt/api
