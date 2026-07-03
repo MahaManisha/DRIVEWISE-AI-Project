@@ -39,14 +39,14 @@ export default function LiveMonitoring({ data }) {
         </div>
 
         {/* Camera Visualizer Screen */}
-        <div className="relative flex-1 rounded-xl bg-slate-950 overflow-hidden flex items-center justify-center border border-slate-900 min-h-[260px]">
+        <div className="relative w-full aspect-video rounded-xl bg-slate-950 overflow-hidden flex items-center justify-center border border-slate-900">
           
           {/* Real MJPEG Video Stream from Python server */}
           {!streamError ? (
             <img 
               src="http://localhost:8000/api/video-feed" 
               alt="Live Driver Stream"
-              className="absolute inset-0 w-full h-full object-cover"
+              className="absolute inset-0 w-full h-full object-contain bg-black"
               onError={() => setStreamError(true)}
             />
           ) : (
