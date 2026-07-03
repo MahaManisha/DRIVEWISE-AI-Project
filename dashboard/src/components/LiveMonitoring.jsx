@@ -18,6 +18,10 @@ export default function LiveMonitoring({ data }) {
 
   const isDrowsy = ear < 0.20;
 
+  const videoFeedUrl = import.meta.env.VITE_API_BASE_URL
+    ? `${import.meta.env.VITE_API_BASE_URL}/video-feed`
+    : 'http://localhost:8000/api/video-feed';
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
       
@@ -44,7 +48,7 @@ export default function LiveMonitoring({ data }) {
           {/* Real MJPEG Video Stream from Python server */}
           {!streamError ? (
             <img 
-              src="http://localhost:8000/api/video-feed" 
+              src={videoFeedUrl} 
               alt="Live Driver Stream"
               className="absolute inset-0 w-full h-full object-contain bg-black"
               onError={() => setStreamError(true)}
