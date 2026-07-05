@@ -126,15 +126,14 @@ export default function LiveMonitoring({
           const avgVolume = totalFreqValue / array.length;
           const normalizedVol = avgVolume / 255.0;
 
-          // Simple amplitude threshold check
-          if (normalizedVol > 0.04) {
+          // Stable threshold (0.07) to filter ambient clicks/hums
+          if (normalizedVol > 0.07) {
             talkingCount++;
           } else {
-            talkingCount = Math.max(0, talkingCount - 1);
+            talkingCount = Math.max(0, talkingCount - 2);
           }
 
-          // If sound level is high for multiple consecutive frames, trigger talk flag
-          const isCurrentlyTalking = talkingCount > 6;
+          const isCurrentlyTalking = talkingCount > 10;
           setTalkingFlag(isCurrentlyTalking);
         };
         setMicStatus('Active');
@@ -273,11 +272,13 @@ export default function LiveMonitoring({
                 ctx.fillText('FACE_01', x + 6, y + 18);
                 ctx.fillText(isCurrentlyDrowsy ? 'FATIGUE DETECTED' : (distracted ? 'DISTRACTED' : 'SCAN OK'), x + w - 120, y + 18);
               } else {
-                // If face is missing completely for several frames, mark as distracted
                 faceMissingCount.current++;
-                if (faceMissingCount.current > 15) {
-                  distracted = true;
-                }
+                // If face is completely missing, do not raise gaze distraction alert, but draw HUD error
+                distracted = false;
+                
+                ctx.fillStyle = '#ef4444';
+                ctx.font = 'bold 14px monospace';
+                ctx.fillText('NO FACE DETECTED', canvas.width / 2 - 60, canvas.height / 2);
               }
 
               // Propagate telemetry updates to Parent state
@@ -530,13 +531,23 @@ export default function LiveMonitoring({
         )}
 
         {/* Phone Detection Status Card */}
-        <div className={`glass-card p-4 rounded-2xl flex items-center justify-between border ${phone_detected ? 'border-red-500/30 bg-red-500/5' : 'border-transparent'}`}>
+        <div 
+          onClick={() => {
+            if (feedMode === 'browser') {
+              setDemoControls(prev => ({ ...prev, phone_detected: !prev.phone_detected }));
+            }
+          }}
+          className={`glass-card p-4 rounded-2xl flex items-center justify-between border transition-all duration-250 ${feedMode === 'browser' ? 'cursor-pointer hover:bg-slate-800/30 hover:border-blue-500/20 active:scale-[0.98]' : ''} ${phone_detected ? 'border-red-500/30 bg-red-500/5' : 'border-transparent'}`}
+        >
           <div className="flex items-center gap-3">
             <div className={`p-2.5 rounded-xl border ${phone_detected ? 'bg-red-500/20 border-red-500/30 text-red-400 animate-bounce' : 'bg-slate-800/50 border-slate-700/50 text-slate-400'}`}>
               {phone_detected ? <PhoneCall className="w-5 h-5" /> : <PhoneOff className="w-5 h-5" />}
             </div>
             <div>
-              <h4 className="text-sm font-semibold text-white">Phone Detection</h4>
+              <h4 className="text-sm font-semibold text-white flex items-center gap-1.5">
+                Phone Detection
+                {feedMode === 'browser' && <span className="text-[9px] text-blue-400 font-mono">(Simulate)</span>}
+              </h4>
               <p className="text-xs text-slate-400 mt-0.5">YOLOv8 Class 67 Monitor</p>
             </div>
           </div>
@@ -546,13 +557,23 @@ export default function LiveMonitoring({
         </div>
 
         {/* Passenger Detection Status Card */}
-        <div className={`glass-card p-4 rounded-2xl flex items-center justify-between border ${passenger_detected ? 'border-blue-500/20 bg-blue-500/5' : 'border-transparent'}`}>
+        <div 
+          onClick={() => {
+            if (feedMode === 'browser') {
+              setDemoControls(prev => ({ ...prev, passenger_detected: !prev.passenger_detected }));
+            }
+          }}
+          className={`glass-card p-4 rounded-2xl flex items-center justify-between border transition-all duration-250 ${feedMode === 'browser' ? 'cursor-pointer hover:bg-slate-800/30 hover:border-blue-500/20 active:scale-[0.98]' : ''} ${passenger_detected ? 'border-blue-500/20 bg-blue-500/5' : 'border-transparent'}`}
+        >
           <div className="flex items-center gap-3">
             <div className={`p-2.5 rounded-xl border ${passenger_detected ? 'bg-blue-500/20 border-blue-500/30 text-blue-400' : 'bg-slate-800/50 border-slate-700/50 text-slate-400'}`}>
               {passenger_detected ? <Users className="w-5 h-5" /> : <Users2 className="w-5 h-5" />}
             </div>
             <div>
-              <h4 className="text-sm font-semibold text-white">Passenger Presence</h4>
+              <h4 className="text-sm font-semibold text-white flex items-center gap-1.5">
+                Passenger Presence
+                {feedMode === 'browser' && <span className="text-[9px] text-blue-400 font-mono">(Simulate)</span>}
+              </h4>
               <p className="text-xs text-slate-400 mt-0.5">Co-pilot/Cabin occupancy</p>
             </div>
           </div>
