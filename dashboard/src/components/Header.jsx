@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Shield, Cpu, RefreshCw, LogOut } from 'lucide-react';
 
-export default function Header({ isOnline, lastSync }) {
+export default function Header({ isOnline, feedMode, setFeedMode }) {
   const [time, setTime] = useState(new Date());
 
   useEffect(() => {
@@ -40,9 +40,31 @@ export default function Header({ isOnline, lastSync }) {
             )}
             <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isOnline ? 'bg-emerald-500' : 'bg-red-500'}`}></span>
           </div>
-          <span className="text-slate-300 font-medium">
-            {isOnline ? 'System Online (Direct)' : 'Local Simulation'}
+          <span className="text-slate-300 font-medium text-xs">
+            {isOnline ? 'Edge Connection Active' : 'Edge Connection Offline'}
           </span>
+        </div>
+
+        {/* Feed Mode Switcher */}
+        <div className="flex bg-[#0f172a]/80 p-1 rounded-xl border border-slate-800/80">
+          <button
+            onClick={() => setFeedMode('browser')}
+            className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition-all duration-200 cursor-pointer ${feedMode === 'browser' ? 'bg-blue-600 text-white shadow-[0_0_12px_rgba(37,99,235,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}
+          >
+            Webcam AI
+          </button>
+          <button
+            onClick={() => {
+              if (!isOnline) {
+                alert("The local Python Edge Server is offline. Please run server.py locally to retrieve live telemetry and video feeds from the edge device.");
+              }
+              setFeedMode('backend');
+            }}
+            className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition-all duration-200 cursor-pointer flex items-center gap-1.5 ${feedMode === 'backend' ? 'bg-blue-600 text-white shadow-[0_0_12px_rgba(37,99,235,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}
+          >
+            <Cpu className="w-3.5 h-3.5" />
+            Edge Server
+          </button>
         </div>
 
         {/* Live Clock */}
